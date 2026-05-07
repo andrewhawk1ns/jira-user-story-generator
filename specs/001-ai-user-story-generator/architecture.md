@@ -74,6 +74,99 @@ sequenceDiagram
 
 ---
 
+## Authentication Flow — Jira OAuth 2.0 + PKCE
+
+The app uses Jira as the sole identity provider. Supabase handles session management but does not issue credentials independently — every user is created/linked via the Atlassian OAuth callback.
+
+There are two paths: a **silent refresh** path for returning users and a **full OAuth** path for first-time logins or when the refresh token has expired.
+
+### Silent Refresh (returning users)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser
+    participant Next as Next.js GET /api/auth/refresh
+    participant Atlassian as Atlassian OAuth
+    participant Supabase as Supabase (Admin)
+
+    Browser->>Browser: LoginPage mounts\nfetch GET /api/auth/refresh
+    Next->>Next: Read sg_uid cookie (30-day httpOnly)
+    alt no sg_uid cookie
+        Next-->>Browser: 401 { reason: "no_uid_cookie" }
+        Browser->>Browser: Show login button (full OAuth path)
+    else sg_uid present
+        Next->>Supabase: jira_tokens SELECT\nWHERE id = uid
+        Supabase-->>Next: { encrypted_refresh_token }
+        Next->>Atlassian: POST /oauth/token\n{ grant_type=refresh_token, refresh_token }
+        Atlassian-->>Next: { access_token, refresh_token, expires_in }
+        Next->>Supabase: jira_tokens UPDATE\n{ encrypted_access_token, token_expires_at }
+        Next->>Supabase: admin.getUserById(uid) → email
+        Next->>Supabase: admin.generateLink({ type: "magiclink", email })
+        Supabase-->>Next: { hashed_token }
+        Next->>Supabase: auth.verifyOtp({ token_hash })
+        Supabase-->>Next: { session }
+        Note over Next: Set Supabase session cookies\nvia @supabase/ssr setSession()
+        Next-->>Browser: 200 { success: true }\nSet-Cookie: sb-access-token, sb-refresh-token
+        Browser->>Browser: window.location.href = "/"
+    end
+```
+
+### Full OAuth (first login or refresh token expired)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser
+    participant Next as Next.js
+    participant Atlassian as Atlassian OAuth
+    participant Jira as Jira REST API
+    participant Supabase as Supabase (Admin)
+
+    Browser->>Next: GET /api/auth/jira
+    Note over Next: Generate PKCE verifier + challenge\nGenerate random state (16-byte hex)
+    Next-->>Browser: { url: "https://auth.atlassian.com/authorize?…" }\nSet-Cookie: jira_pkce_verifier (httpOnly, 10 min)\nSet-Cookie: jira_oauth_state (httpOnly, 10 min)
+
+    Browser->>Atlassian: Redirect → Authorization URL\n(response_type=code, code_challenge, state, scope)\nNo prompt=consent — Atlassian skips consent screen\nfor previously approved scopes
+    Note over Atlassian: First login: user grants consent\nSubsequent logins: consent screen skipped
+    Atlassian->>Next: GET /api/auth/callback?code=…&state=…
+
+    Note over Next: Validate state cookie matches query param\nRead stored PKCE verifier\nDelete PKCE cookies
+    Next->>Atlassian: POST /oauth/token\n{ code, code_verifier, grant_type=authorization_code }
+    Atlassian-->>Next: { access_token, refresh_token, expires_in, scope }
+
+    Next->>Jira: GET /oauth/token/accessible-resources
+    Jira-->>Next: [{ id: cloudId, url: baseUrl }]
+    Next->>Jira: GET /rest/api/3/myself
+    Jira-->>Next: { accountId, displayName }
+
+    Next->>Supabase: admin.createUser\n{ email: "{accountId}@atlassian.local", email_confirm: true }
+    alt new user
+        Supabase-->>Next: { user: { id: userId } }
+    else user already exists (email taken)
+        Next->>Supabase: admin.listUsers() → find by email
+        Supabase-->>Next: { id: userId }
+    end
+
+    Next->>Supabase: jira_tokens.upsert\n{ encrypted_access_token, encrypted_refresh_token,\n  token_expires_at, scopes, jira_cloud_id, jira_base_url }
+    Next->>Supabase: user_profiles.upsert\n{ jira_account_id, jira_display_name }
+
+    Note over Next: Tokens are AES-encrypted before storage
+    Next->>Supabase: admin.generateLink({ type: "magiclink", email })
+    Supabase-->>Next: { hashed_token }
+    Next->>Supabase: auth.verifyOtp({ token_hash, type: "magiclink" })
+    Supabase-->>Next: { session: { access_token, refresh_token } }
+
+    Note over Next: Set Supabase session cookies\nvia @supabase/ssr setSession()\nSet sg_uid cookie (httpOnly, 30 days)
+    Next-->>Browser: 302 Redirect → /\nSet-Cookie: sb-access-token, sb-refresh-token, sg_uid
+```
+
+> **Why the magic-link trick?** Supabase doesn't natively support "log in as this user" from server-side code. Generating a magic link and immediately verifying its OTP hash server-side is the approved pattern for creating a Supabase session after an external OAuth flow without sending any email.
+
+> **Why `sg_uid` and not the Supabase session cookie?** Supabase session cookies are short-lived (typically 1 hour). The `sg_uid` cookie lives for 30 days and is used only to look up which user's Jira refresh token to use — it is not a credential on its own.
+
+---
+
 ## n8n Workflow — Internal Node Graph
 
 ```mermaid

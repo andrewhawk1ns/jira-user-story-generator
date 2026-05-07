@@ -203,7 +203,10 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
   async function handleSignOut() {
     setDropdownOpen(false)
     const supabase = createClient()
-    await supabase.auth.signOut()
+    await Promise.all([
+      supabase.auth.signOut(),
+      fetch('/api/auth/signout', { method: 'POST' }),
+    ])
     router.push('/')
     router.refresh()
   }
