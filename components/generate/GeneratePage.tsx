@@ -103,6 +103,7 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
   const [storyTypeMenuOpen, setStoryTypeMenuOpen] = useState(false)
   const [priority, setPriority] = useState<'Highest' | 'High' | 'Medium' | 'Low' | 'Lowest'>('Medium')
   const [priorityMenuOpen, setPriorityMenuOpen] = useState(false)
+  const [maxStories, setMaxStories] = useState(6)
   const [epics, setEpics] = useState<{ id: string; key: string; summary: string }[]>([])
   const [epicsLoading, setEpicsLoading] = useState(false)
   const [selectedEpic, setSelectedEpic] = useState<{ id: string; key: string; summary: string } | null>(null)
@@ -228,6 +229,7 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
           storyType,
           priority,
           storyPoints: undefined,
+          maxStories,
           dependencies: dependencies.length > 0 ? dependencies : undefined,
         }),
       })
@@ -564,7 +566,7 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
 
                 {additionalOptionsOpen && (
                   <div className="flex flex-col gap-4 px-4 pb-4 pt-1">
-                    {/* Story Type + Priority */}
+                    {/* Story Type + Priority + Max Stories */}
                     <div className="grid grid-cols-2 gap-4">
                       <div className="flex flex-col gap-2" ref={storyTypeMenuRef}>
                         <label className="text-sm font-medium text-[#172b4d]">Story Type</label>
@@ -620,6 +622,27 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
                             </div>
                           )}
                         </div>
+                      </div>
+                    </div>
+
+                    {/* Max Stories */}
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-[#172b4d]">Max Stories</label>
+                        <span className="text-sm font-semibold text-[#0052cc]">{maxStories}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={1}
+                        max={10}
+                        step={1}
+                        value={maxStories}
+                        onChange={(e) => setMaxStories(Number(e.target.value))}
+                        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-[#dfe1e6] accent-[#0052cc]"
+                      />
+                      <div className="flex justify-between text-[10px] text-[#6b778c]">
+                        <span>1</span>
+                        <span>10</span>
                       </div>
                     </div>
 

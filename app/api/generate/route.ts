@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 422 })
   }
 
-  const { type, sourceText, audioPath, jiraProjectKey, epicId, sprintId, outputLanguage, storyType, priority, storyPoints, dependencies } = parsed.data
+  const { type, sourceText, audioPath, jiraProjectKey, epicId, sprintId, outputLanguage, storyType, priority, maxStories, dependencies } = parsed.data
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const serviceClient = createServiceClient() as any
 
@@ -116,6 +116,7 @@ export async function POST(request: NextRequest) {
         outputLanguage: outputLanguage ?? 'English',
         storyType: storyType ?? 'User Story',
         priority: priority ?? 'Medium',
+        maxStories: maxStories ?? 6,
         dependencies: dependencies ?? [],
       }),
     })

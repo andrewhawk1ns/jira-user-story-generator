@@ -25,6 +25,7 @@ export const generateRequestSchema = z
     storyType: z.enum(['User Story', 'Bug', 'Task', 'Sub-task']).optional(),
     priority: z.enum(['Highest', 'High', 'Medium', 'Low', 'Lowest']).optional(),
     storyPoints: z.union([z.number(), z.literal('auto')]).optional(),
+    maxStories: z.number().int().min(1).max(10).optional(),
     dependencies: z
       .array(
         z.object({
