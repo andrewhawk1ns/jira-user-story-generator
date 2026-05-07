@@ -14,12 +14,18 @@ const n8nStorySchema = z.object({
       description: z.string(),
       acceptanceCriteria: z.array(z.string()).optional(),
       storyPoints: z.number().optional(),
+      labels: z.array(z.string()).optional(),
+      blockedByIssueKeys: z.array(z.string()).optional(),
+      blocksIssueKeys: z.array(z.string()).optional(),
     })
     .optional(),
   title: z.string(),
   description: z.string().optional(),
   acceptanceCriteria: z.union([z.string(), z.array(z.string())]).optional(),
   storyPoints: z.number().optional(),
+  labels: z.array(z.string()).optional(),
+  blockedByIssueKeys: z.array(z.string()).optional(),
+  blocksIssueKeys: z.array(z.string()).optional(),
 })
 
 // chainLlm + structured parser returns { output: { stories: [...] } }
@@ -52,7 +58,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 422 })
   }
 
-  const { type, sourceText, audioPath, jiraProjectKey, epicId, sprintId } = parsed.data
+  const { type, sourceText, audioPath, jiraProjectKey, epicId, sprintId, outputLanguage, storyType, priority, storyPoints, dependencies } = parsed.data
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const serviceClient = createServiceClient() as any
 
@@ -107,6 +113,10 @@ export async function POST(request: NextRequest) {
         jiraProjectKey,
         epicId: epicId ?? null,
         sprintId: sprintId ?? null,
+        outputLanguage: outputLanguage ?? 'English',
+        storyType: storyType ?? 'User Story',
+        priority: priority ?? 'Medium',
+        dependencies: dependencies ?? [],
       }),
     })
 
@@ -130,6 +140,24 @@ export async function POST(request: NextRequest) {
       throw new Error(`n8n response is not valid JSON: ${responseText.slice(0, 200)}`)
     }
 
+    // Handle toxicity rejection from n8n
+    if (
+      typeof rawJson === 'object' &&
+      rawJson !== null &&
+      'error' in rawJson &&
+      (rawJson as Record<string, unknown>).error === 'content_rejected'
+    ) {
+      const message =
+        typeof (rawJson as Record<string, unknown>).message === 'string'
+          ? ((rawJson as Record<string, unknown>).message as string)
+          : 'Your input was rejected. Please revise it and try again.'
+      await serviceClient
+        .from('generation_sessions')
+        .update({ status: 'error', error_message: message })
+        .eq('id', sessionId)
+      return NextResponse.json({ error: 'content_rejected', message }, { status: 422 })
+    }
+
     const parsedStories = n8nResponseSchema.safeParse(rawJson)
 
     if (!parsedStories.success) {
@@ -150,6 +178,9 @@ export async function POST(request: NextRequest) {
           : []
 
       const storyPoints = s.storyData?.storyPoints ?? s.storyPoints ?? null
+      const labels = s.storyData?.labels ?? s.labels ?? []
+      const blockedByIssueKeys = s.storyData?.blockedByIssueKeys ?? s.blockedByIssueKeys ?? []
+      const blocksIssueKeys = s.storyData?.blocksIssueKeys ?? s.blocksIssueKeys ?? []
 
       return {
         session_id: sessionId,
@@ -158,6 +189,9 @@ export async function POST(request: NextRequest) {
         user_story_statement: userStoryStatement,
         acceptance_criteria: acceptanceCriteria,
         story_points: storyPoints,
+        labels,
+        blocked_by_issue_keys: blockedByIssueKeys,
+        blocks_issue_keys: blocksIssueKeys,
         generated_title: title,
         generated_user_story_statement: userStoryStatement,
         generated_acceptance_criteria: acceptanceCriteria,
@@ -168,7 +202,7 @@ export async function POST(request: NextRequest) {
     const { data: insertedStories, error: insertError } = await serviceClient
       .from('generated_stories')
       .insert(storyRows)
-      .select('id, title, user_story_statement, acceptance_criteria, priority, labels, story_points, status, sort_order')
+      .select('id, title, user_story_statement, acceptance_criteria, priority, labels, story_points, status, sort_order, blocked_by_issue_keys, blocks_issue_keys')
 
     if (insertError) {
       throw new Error(`Failed to save stories: ${insertError.message}`)

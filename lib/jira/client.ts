@@ -13,7 +13,7 @@ import {
   jiraSprintSchema,
   jiraIssueSearchResultSchema,
 } from '../schemas/jira'
-import { buildJiraDescription, mapPriorityToJira } from './field-mapping'
+import { buildJiraDescription, buildJiraDescriptionFromStrings, buildMinimalAdfDescription, mapPriorityToJira, normalizePriorityString } from './field-mapping'
 import type { AcceptanceCriterion, StoryPriority } from '../schemas/story'
 import type {
   JiraEpic,
@@ -121,7 +121,7 @@ export async function getEpics(userId: string, projectKey: string): Promise<Jira
   )
   const raw = await jiraFetch<{
     issues: Array<{ id: string; key: string; fields: { summary: string } }>
-  }>(userId, `/search?jql=${jql}&fields=key,summary&maxResults=100`)
+  }>(userId, `/search/jql?jql=${jql}&fields=key,summary&maxResults=100`)
   return jiraEpicSchema
     .array()
     .parse(raw.issues.map((i) => ({ id: i.id, key: i.key, summary: i.fields.summary })))
@@ -156,7 +156,7 @@ export async function searchIssues(userId: string, jql: string): Promise<JiraIss
         description?: { content?: Array<{ content?: Array<{ text?: string }> }> }
       }
     }>
-  }>(userId, `/search?jql=${encodeURIComponent(jql)}&fields=key,summary,description&maxResults=50`)
+  }>(userId, `/search/jql?jql=${encodeURIComponent(jql)}&fields=key,summary,description&maxResults=50`)
   return jiraIssueSearchResultSchema.array().parse(
     raw.issues.map((i) => ({
       key: i.key,
@@ -214,8 +214,122 @@ export async function createIssue(userId: string, story: JiraStoryInput): Promis
   return { key: created.key, url: issueUrl, linkErrors: [] }
 }
 
-export async function createIssueLink(
-  userId: string,
+export interface JiraStoryInputRaw {
+  title: string
+  userStoryStatement: string
+  acceptanceCriteria: string[]
+  storyType: string
+  priority: string
+  labels: string[]
+  storyPoints?: number | null
+  epicKey?: string
+  projectKey: string
+  blockedByIssueKeys?: string[]
+  blocksIssueKeys?: string[]
+}
+
+const ISSUE_TYPE_MAP: Record<string, string> = {
+  'user story': 'Story',
+  'bug': 'Bug',
+  'task': 'Task',
+  'sub-task': 'Sub-task',
+}
+
+function mapIssueType(storyType: string): string {
+  return ISSUE_TYPE_MAP[storyType.toLowerCase()] ?? storyType
+}
+
+export async function createIssueRaw(userId: string, story: JiraStoryInputRaw): Promise<PushResult> {
+  console.log('[createIssueRaw] labels:', story.labels, '| blockedBy:', story.blockedByIssueKeys, '| blocks:', story.blocksIssueKeys)
+  const fields: Record<string, unknown> = {
+    project: { key: story.projectKey },
+    issuetype: { name: mapIssueType(story.storyType || 'Story') },
+    summary: story.title,
+    description: buildJiraDescriptionFromStrings(story.userStoryStatement, story.acceptanceCriteria),
+    priority: { name: normalizePriorityString(story.priority) },
+  }
+
+  if (story.labels.length > 0) {
+    fields.labels = story.labels
+  }
+
+  if (story.storyPoints != null) {
+    const spFieldId = process.env.JIRA_STORY_POINTS_FIELD_ID
+    if (spFieldId && /^customfield_\d+$/.test(spFieldId)) {
+      fields[spFieldId] = story.storyPoints
+    }
+  }
+
+  if (story.epicKey) {
+    fields.parent = { key: story.epicKey }
+  }
+
+  async function attemptCreate(f: Record<string, unknown>) {
+    return jiraFetch<{ key: string; id: string; self: string }>(userId, '/issue', {
+      method: 'POST',
+      body: JSON.stringify({ fields: f }),
+    })
+  }
+
+  let created: { key: string; id: string; self: string }
+  try {
+    created = await attemptCreate(fields)
+  } catch (err) {
+    if (!(err instanceof Error && err.message.includes('INVALID_INPUT'))) throw err
+    // Retry 1: strip priority + parent (next-gen/team-managed projects reject these)
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { priority: _p, parent: _pa, ...fieldsNoClassic } = fields
+    try {
+      created = await attemptCreate(fieldsNoClassic)
+    } catch (err2) {
+      if (!(err2 instanceof Error && err2.message.includes('INVALID_INPUT'))) throw err2
+      // Retry 2: also swap description for minimal paragraph-only ADF (no headings)
+      created = await attemptCreate({
+        ...fieldsNoClassic,
+        description: buildMinimalAdfDescription(story.userStoryStatement, story.acceptanceCriteria),
+      })
+    }
+  }
+
+  const tokenResult = await createServiceClient()
+    .from('jira_tokens')
+    .select('jira_base_url')
+    .eq('id', userId)
+    .single()
+  const tokenData = tokenResult.data as Pick<Tables<'jira_tokens'>, 'jira_base_url'> | null
+  const baseUrl = tokenData?.jira_base_url ?? ''
+
+  // Create issue links (best-effort — failures collected, not thrown)
+  const linkErrors: string[] = []
+  const linksToCreate: Array<{ inward: string; outward: string; typeName: string }> = []
+
+  for (const blockerKey of story.blockedByIssueKeys ?? []) {
+    // "is blocked by" — inward issue blocks outward (created) issue
+    linksToCreate.push({ inward: blockerKey, outward: created.key, typeName: 'Blocks' })
+  }
+  for (const blockedKey of story.blocksIssueKeys ?? []) {
+    // created issue blocks the outward issue
+    linksToCreate.push({ inward: created.key, outward: blockedKey, typeName: 'Blocks' })
+  }
+
+  for (const link of linksToCreate) {
+    try {
+      await createIssueLink(userId, {
+        inwardIssueKey: link.inward,
+        outwardIssueKey: link.outward,
+        linkTypeName: link.typeName,
+      })
+    } catch (err) {
+      linkErrors.push(
+        `Failed to link ${link.inward} → ${link.outward}: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+
+  return { key: created.key, url: `${baseUrl}/browse/${created.key}`, linkErrors }
+}
+
+export async function createIssueLink(  userId: string,
   payload: JiraIssueLinkPayload
 ): Promise<void> {
   await jiraFetch<void>(userId, '/issueLink', {

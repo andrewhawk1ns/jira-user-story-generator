@@ -21,6 +21,19 @@ export const generateRequestSchema = z
     epicId: z.string().optional(),
     sprintId: z.string().optional(),
     contextTicketIds: z.array(z.string()).optional(),
+    outputLanguage: z.string().optional(),
+    storyType: z.enum(['User Story', 'Bug', 'Task', 'Sub-task']).optional(),
+    priority: z.enum(['Highest', 'High', 'Medium', 'Low', 'Lowest']).optional(),
+    storyPoints: z.union([z.number(), z.literal('auto')]).optional(),
+    dependencies: z
+      .array(
+        z.object({
+          type: z.enum(['Blocked by', 'Blocks']),
+          issueKey: z.string(),
+          summary: z.string().optional(),
+        })
+      )
+      .optional(),
   })
   .refine((data) => data.sourceText || data.audioPath, {
     message: 'Either sourceText or audioPath is required',

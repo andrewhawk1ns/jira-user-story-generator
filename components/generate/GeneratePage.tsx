@@ -11,6 +11,8 @@ import {
   Mic,
   Sparkles,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   FileX,
   User,
   Settings,
@@ -26,6 +28,8 @@ import {
   Clock,
   Wrench,
   ExternalLink,
+  X,
+  Plus,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { createClient } from '@/lib/supabase/client'
@@ -41,9 +45,17 @@ type GeneratedStory = {
   labels: string[]
   story_points: number | null
   status: 'pending' | 'approved' | 'rejected'
+  blocked_by_issue_keys: string[]
+  blocks_issue_keys: string[]
 }
 
 type GenerationStatus = 'idle' | 'generating' | 'ready' | 'error'
+
+type DependencyEntry = {
+  type: 'Blocked by' | 'Blocks'
+  issueKey: string
+  summary?: string
+}
 
 const SESSION_TABS = [
   { id: 'requirements', label: 'Requirements', icon: FileText },
@@ -71,6 +83,7 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
   const [generationStatus, setGenerationStatus] = useState<GenerationStatus>('idle')
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [stories, setStories] = useState<GeneratedStory[]>([])
+  const [viewStoryIdx, setViewStoryIdx] = useState(0)
   const [storyPointsMap, setStoryPointsMap] = useState<Record<string, number | null>>({})
   const [generatedAt, setGeneratedAt] = useState<Date | null>(null)
   const [sourceTextUsed, setSourceTextUsed] = useState('')
@@ -78,8 +91,38 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
   const [profileOpen, setProfileOpen] = useState(false)
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [selectedProject, setSelectedProject] = useState<JiraProject | null>(projects[0] ?? null)
+  const [languageMenuOpen, setLanguageMenuOpen] = useState(false)
+  const [selectedLanguage, setSelectedLanguage] = useState({ code: 'English', flag: '🇬🇧', label: 'English' })
   const dropdownRef = useRef<HTMLDivElement>(null)
   const projectMenuRef = useRef<HTMLDivElement>(null)
+  const languageMenuRef = useRef<HTMLDivElement>(null)
+
+  // Additional options
+  const [additionalOptionsOpen, setAdditionalOptionsOpen] = useState(false)
+  const [storyType, setStoryType] = useState<'User Story' | 'Bug' | 'Task' | 'Sub-task'>('User Story')
+  const [storyTypeMenuOpen, setStoryTypeMenuOpen] = useState(false)
+  const [priority, setPriority] = useState<'Highest' | 'High' | 'Medium' | 'Low' | 'Lowest'>('Medium')
+  const [priorityMenuOpen, setPriorityMenuOpen] = useState(false)
+  const [epics, setEpics] = useState<{ id: string; key: string; summary: string }[]>([])
+  const [epicsLoading, setEpicsLoading] = useState(false)
+  const [selectedEpic, setSelectedEpic] = useState<{ id: string; key: string; summary: string } | null>(null)
+  const [epicMenuOpen, setEpicMenuOpen] = useState(false)
+  const [creatingTicket, setCreatingTicket] = useState(false)
+  const [createdTickets, setCreatedTickets] = useState<Record<string, { key: string; url: string }>>({})
+  const [dependencies, setDependencies] = useState<DependencyEntry[]>([])
+  const [depType, setDepType] = useState<DependencyEntry['type']>('Blocked by')
+  const [depTypeMenuOpen, setDepTypeMenuOpen] = useState(false)
+  const [ticketSearchOpen, setTicketSearchOpen] = useState(false)
+  const [ticketSearchQuery, setTicketSearchQuery] = useState('')
+  const [ticketSearchResults, setTicketSearchResults] = useState<{ key: string; summary: string }[]>([])
+  const [ticketSearchLoading, setTicketSearchLoading] = useState(false)
+
+  const storyTypeMenuRef = useRef<HTMLDivElement>(null)
+  const priorityMenuRef = useRef<HTMLDivElement>(null)
+  const epicMenuRef = useRef<HTMLDivElement>(null)
+  const depTypeMenuRef = useRef<HTMLDivElement>(null)
+  const ticketSearchRef = useRef<HTMLDivElement>(null)
+  const ticketSearchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const name = jiraDisplayName ?? displayName ?? 'User'
   const initial = name.charAt(0).toUpperCase()
@@ -93,10 +136,68 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
       if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node)) {
         setProjectMenuOpen(false)
       }
+      if (languageMenuRef.current && !languageMenuRef.current.contains(e.target as Node)) {
+        setLanguageMenuOpen(false)
+      }
+      if (storyTypeMenuRef.current && !storyTypeMenuRef.current.contains(e.target as Node)) {
+        setStoryTypeMenuOpen(false)
+      }
+      if (priorityMenuRef.current && !priorityMenuRef.current.contains(e.target as Node)) {
+        setPriorityMenuOpen(false)
+      }
+      if (epicMenuRef.current && !epicMenuRef.current.contains(e.target as Node)) {
+        setEpicMenuOpen(false)
+      }
+      if (depTypeMenuRef.current && !depTypeMenuRef.current.contains(e.target as Node)) {
+        setDepTypeMenuOpen(false)
+      }
+      if (ticketSearchRef.current && !ticketSearchRef.current.contains(e.target as Node)) {
+        setTicketSearchOpen(false)
+      }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  async function fetchEpics(projectKey: string) {
+    setEpicsLoading(true)
+    try {
+      const res = await fetch(`/api/jira/epics?projectKey=${encodeURIComponent(projectKey)}`)
+      if (res.ok) {
+        const data = await res.json()
+        setEpics(data.epics ?? [])
+      }
+    } catch {
+      // silently fail — epics list stays empty
+    } finally {
+      setEpicsLoading(false)
+    }
+  }
+
+  function handleTicketSearch(q: string) {
+    if (!selectedProject) return
+    if (ticketSearchTimeout.current) clearTimeout(ticketSearchTimeout.current)
+    if (!q.trim()) {
+      setTicketSearchResults([])
+      setTicketSearchLoading(false)
+      return
+    }
+    setTicketSearchLoading(true)
+    ticketSearchTimeout.current = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ projectKey: selectedProject.key, query: q })
+        const res = await fetch(`/api/jira/issues/search?${params}`)
+        if (res.ok) {
+          const data = await res.json()
+          setTicketSearchResults(data.issues ?? [])
+        }
+      } catch {
+        setTicketSearchResults([])
+      } finally {
+        setTicketSearchLoading(false)
+      }
+    }, 350)
+  }
 
   async function handleSignOut() {
     setDropdownOpen(false)
@@ -114,6 +215,7 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
     setGenerationStatus('generating')
     setGenerationError(null)
     setStories([])
+    setViewStoryIdx(0)
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -122,14 +224,25 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
           type: sessionTab,
           sourceText: requirements,
           jiraProjectKey: selectedProject.key,
+          outputLanguage: selectedLanguage.code,
+          storyType,
+          priority,
+          storyPoints: undefined,
+          dependencies: dependencies.length > 0 ? dependencies : undefined,
         }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
+        if (err.error === 'content_rejected') {
+          throw new Error(err.message ?? 'Your input was rejected. Please revise it and try again.')
+        }
         throw new Error(err.error ?? `Server error ${res.status}`)
       }
       const { stories: returned } = await res.json()
       setStories(returned ?? [])
+      setViewStoryIdx(0)
+      setCreatedTickets({})
+      setSelectedEpic(null)
       setGeneratedAt(new Date())
       setSourceTextUsed(requirements)
       setGenerationStatus('ready')
@@ -139,6 +252,63 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
       setGenerationError(err instanceof Error ? err.message : 'Failed to start generation')
     } finally {
       setGenerating(false)
+    }
+  }
+
+  async function handleCreateTicket() {
+    const story = stories[viewStoryIdx]
+    if (!story || !selectedProject || creatingTicket) return
+    setCreatingTicket(true)
+    try {
+      const pts = storyPointsMap[story.id] ?? story.story_points
+      const ac = Array.isArray(story.acceptance_criteria) ? story.acceptance_criteria : []
+      const acStrings: string[] = ac.map((item) =>
+        typeof item === 'string'
+          ? item
+          : `Given ${(item as { given: string; when: string; then: string }).given}, when ${(item as { given: string; when: string; then: string }).when}, then ${(item as { given: string; when: string; then: string }).then}`
+      )
+
+      const effectiveLabels: string[] =
+        story.labels && story.labels.length > 0
+          ? story.labels
+          : [
+              'user-story',
+              story.priority ? `${story.priority.toLowerCase()}-priority` : 'medium-priority',
+              'needs-refinement',
+            ]
+
+      const storyBlockedBy = story.blocked_by_issue_keys ?? []
+      const storyBlocks = story.blocks_issue_keys ?? []
+      const genBlockedBy = dependencies.filter((d) => d.type === 'Blocked by').map((d) => d.issueKey)
+      const genBlocks = dependencies.filter((d) => d.type === 'Blocks').map((d) => d.issueKey)
+      const effectiveBlockedBy = storyBlockedBy.length > 0 ? storyBlockedBy : genBlockedBy
+      const effectiveBlocks = storyBlocks.length > 0 ? storyBlocks : genBlocks
+
+      const res = await fetch('/api/jira/issues/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: story.title,
+          userStoryStatement: story.user_story_statement,
+          acceptanceCriteria: acStrings,
+          storyType,
+          priority: story.priority ?? priority,
+          labels: effectiveLabels,
+          storyPoints: typeof pts === 'number' ? pts : undefined,
+          epicKey: selectedEpic?.key,
+          projectKey: selectedProject.key,
+          blockedByIssueKeys: effectiveBlockedBy,
+          blocksIssueKeys: effectiveBlocks,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Failed to create ticket')
+      setCreatedTickets((prev) => ({ ...prev, [story.id]: { key: data.key, url: data.url } }))
+      toast.success(`Ticket ${data.key} created successfully!`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create ticket')
+    } finally {
+      setCreatingTicket(false)
     }
   }
 
@@ -186,7 +356,7 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
                   {projects.map((p) => (
                     <button
                       key={p.key}
-                      onClick={() => { setSelectedProject(p); setProjectMenuOpen(false) }}
+                      onClick={() => { setSelectedProject(p); setProjectMenuOpen(false); setEpics([]); setDependencies([]) }}
                       className={`flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-[#f4f5f7] ${
                         selectedProject?.key === p.key ? 'bg-[#deebff] font-medium text-[#0052cc]' : 'text-[#172b4d]'
                       }`}
@@ -339,23 +509,254 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
               )}
 
               {/* Output language */}
-              <div className="flex flex-col gap-2">
+              <div className="relative flex flex-col gap-2" ref={languageMenuRef}>
                 <label className="text-sm font-medium text-[#172b4d]">Output Language</label>
-                <button className="flex h-9 w-full items-center justify-between rounded border border-[#dfe1e6] bg-[#fafbfc] px-3 py-2 text-sm font-medium text-[#172b4d] hover:bg-[#f4f5f7]">
+                <button
+                  onClick={() => setLanguageMenuOpen((o) => !o)}
+                  className="flex h-9 w-full items-center justify-between rounded border border-[#dfe1e6] bg-[#fafbfc] px-3 py-2 text-sm font-medium text-[#172b4d] hover:bg-[#f4f5f7]"
+                >
                   <span className="flex items-center gap-2">
-                    <span>🇬🇧</span>
-                    <span>English</span>
+                    <span>{selectedLanguage.flag}</span>
+                    <span>{selectedLanguage.label}</span>
                   </span>
                   <ChevronDown className="h-4 w-4 text-[#6b778c]" />
                 </button>
+                {languageMenuOpen && (
+                  <div className="absolute top-full left-0 z-50 mt-1 w-full rounded-[10px] border border-[#dfe1e6] bg-white shadow-lg">
+                    {[
+                      { code: 'English', flag: '🇬🇧', label: 'English' },
+                      { code: 'French', flag: '🇫🇷', label: 'French' },
+                      { code: 'German', flag: '🇩🇪', label: 'German' },
+                      { code: 'Spanish', flag: '🇪🇸', label: 'Spanish' },
+                      { code: 'Portuguese', flag: '🇵🇹', label: 'Portuguese' },
+                      { code: 'Dutch', flag: '🇳🇱', label: 'Dutch' },
+                      { code: 'Italian', flag: '🇮🇹', label: 'Italian' },
+                      { code: 'Japanese', flag: '🇯🇵', label: 'Japanese' },
+                    ].map((lang) => (
+                      <button
+                        key={lang.code}
+                        onClick={() => { setSelectedLanguage(lang); setLanguageMenuOpen(false) }}
+                        className={`flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-[#f4f5f7] ${
+                          selectedLanguage.code === lang.code ? 'bg-[#deebff] font-medium text-[#0052cc]' : 'text-[#172b4d]'
+                        }`}
+                      >
+                        <span>{lang.flag}</span>
+                        <span>{lang.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Additional options */}
               <div className="rounded-[6px] border border-[#dfe1e6]">
-                <button className="flex h-[52px] w-full items-center justify-between px-4 text-sm font-medium text-[#172b4d]">
+                <button
+                  onClick={() => setAdditionalOptionsOpen((o) => !o)}
+                  className="flex h-[52px] w-full items-center justify-between px-4 text-sm font-medium text-[#172b4d]"
+                >
                   Additional Options (Optional)
-                  <ChevronDown className="h-4 w-4 text-[#6b778c]" />
+                  <ChevronDown
+                    className={`h-4 w-4 text-[#6b778c] transition-transform ${
+                      additionalOptionsOpen ? 'rotate-180' : ''
+                    }`}
+                  />
                 </button>
+
+                {additionalOptionsOpen && (
+                  <div className="flex flex-col gap-4 px-4 pb-4 pt-1">
+                    {/* Story Type + Priority */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="flex flex-col gap-2" ref={storyTypeMenuRef}>
+                        <label className="text-sm font-medium text-[#172b4d]">Story Type</label>
+                        <div className="relative">
+                          <button
+                            onClick={() => setStoryTypeMenuOpen((o) => !o)}
+                            className="flex h-9 w-full items-center justify-between rounded border border-[#dfe1e6] bg-[#fafbfc] px-3 py-2 text-sm font-medium text-[#172b4d] hover:bg-[#f4f5f7]"
+                          >
+                            {storyType}
+                            <ChevronDown className="h-4 w-4 text-[#6b778c]" />
+                          </button>
+                          {storyTypeMenuOpen && (
+                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-[10px] border border-[#dfe1e6] bg-white shadow-lg">
+                              {(['User Story', 'Bug', 'Task', 'Sub-task'] as const).map((opt) => (
+                                <button
+                                  key={opt}
+                                  onClick={() => { setStoryType(opt); setStoryTypeMenuOpen(false) }}
+                                  className={`flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-[#f4f5f7] ${
+                                    storyType === opt ? 'bg-[#deebff] font-medium text-[#0052cc]' : 'text-[#172b4d]'
+                                  }`}
+                                >
+                                  {opt}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-2" ref={priorityMenuRef}>
+                        <label className="text-sm font-medium text-[#172b4d]">Priority</label>
+                        <div className="relative">
+                          <button
+                            onClick={() => setPriorityMenuOpen((o) => !o)}
+                            className="flex h-9 w-full items-center justify-between rounded border border-[#dfe1e6] bg-[#fafbfc] px-3 py-2 text-sm font-medium text-[#172b4d] hover:bg-[#f4f5f7]"
+                          >
+                            {priority}
+                            <ChevronDown className="h-4 w-4 text-[#6b778c]" />
+                          </button>
+                          {priorityMenuOpen && (
+                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-[10px] border border-[#dfe1e6] bg-white shadow-lg">
+                              {(['Highest', 'High', 'Medium', 'Low', 'Lowest'] as const).map((opt) => (
+                                <button
+                                  key={opt}
+                                  onClick={() => { setPriority(opt); setPriorityMenuOpen(false) }}
+                                  className={`flex w-full items-center px-4 py-2.5 text-left text-sm hover:bg-[#f4f5f7] ${
+                                    priority === opt ? 'bg-[#deebff] font-medium text-[#0052cc]' : 'text-[#172b4d]'
+                                  }`}
+                                >
+                                  {opt}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Dependencies */}
+                    <div className="flex flex-col gap-3">
+                      <label className="text-sm font-medium text-[#172b4d]">Dependencies</label>
+                      <div className="flex items-center gap-2">
+                        {/* Dependency type */}
+                        <div className="relative shrink-0" ref={depTypeMenuRef}>
+                          <button
+                            onClick={() => setDepTypeMenuOpen((o) => !o)}
+                            className="flex h-9 w-[148px] items-center justify-between rounded border border-[#dfe1e6] bg-[#fafbfc] px-3 py-2 text-sm font-medium text-[#172b4d] hover:bg-[#f4f5f7]"
+                          >
+                            <span className="flex items-center gap-1.5">
+                              <span className="h-2 w-2 shrink-0 rounded-full bg-[#de350b]" />
+                              {depType}
+                            </span>
+                            <ChevronDown className="ml-1 h-4 w-4 shrink-0 text-[#6b778c]" />
+                          </button>
+                          {depTypeMenuOpen && (
+                            <div className="absolute left-0 top-full z-50 mt-1 w-max min-w-full rounded-[10px] border border-[#dfe1e6] bg-white shadow-lg">
+                              {(['Blocked by', 'Blocks'] as const).map((opt) => (
+                                <button
+                                  key={opt}
+                                  onClick={() => { setDepType(opt); setDepTypeMenuOpen(false) }}
+                                  className={`flex w-full items-center gap-1.5 px-4 py-2.5 text-left text-sm hover:bg-[#f4f5f7] ${
+                                    depType === opt ? 'bg-[#deebff] font-medium text-[#0052cc]' : 'text-[#172b4d]'
+                                  }`}
+                                >
+                                  {opt}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Add Jira ticket search */}
+                        <div className="relative flex-1" ref={ticketSearchRef}>
+                          <button
+                            onClick={() => {
+                              setTicketSearchOpen((o) => !o)
+                              if (!ticketSearchOpen) {
+                                setTicketSearchQuery('')
+                                setTicketSearchResults([])
+                              }
+                            }}
+                            className="flex h-9 w-full items-center gap-2 rounded border border-[#dfe1e6] bg-[#f4f5f7] px-3 py-2 text-sm font-medium text-[#172b4d] hover:bg-[#ebecf0]"
+                          >
+                            <Plus className="h-4 w-4 text-[#6b778c]" />
+                            Add Jira ticket
+                          </button>
+                          {ticketSearchOpen && (
+                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-[10px] border border-[#dfe1e6] bg-white shadow-lg">
+                              <div className="p-2">
+                                <input
+                                  autoFocus
+                                  type="text"
+                                  placeholder="Search tickets…"
+                                  value={ticketSearchQuery}
+                                  onChange={(e) => {
+                                    setTicketSearchQuery(e.target.value)
+                                    handleTicketSearch(e.target.value)
+                                  }}
+                                  className="w-full rounded border border-[#dfe1e6] bg-[#fafbfc] px-3 py-1.5 text-sm text-[#172b4d] outline-none focus:border-[#0052cc]"
+                                />
+                              </div>
+                              <div className="max-h-40 overflow-y-auto">
+                                {ticketSearchLoading ? (
+                                  <div className="flex items-center justify-center py-3">
+                                    <Loader2 className="h-4 w-4 animate-spin text-[#6b778c]" />
+                                  </div>
+                                ) : ticketSearchResults.length === 0 ? (
+                                  <p className="px-4 py-3 text-sm text-[#6b778c]">
+                                    {ticketSearchQuery ? 'No tickets found' : 'Type to search tickets…'}
+                                  </p>
+                                ) : (
+                                  ticketSearchResults.map((issue) => (
+                                    <button
+                                      key={issue.key}
+                                      onClick={() => {
+                                        if (!dependencies.some((d) => d.issueKey === issue.key)) {
+                                          setDependencies((prev) => [
+                                            ...prev,
+                                            { type: depType, issueKey: issue.key, summary: issue.summary },
+                                          ])
+                                        }
+                                        setTicketSearchOpen(false)
+                                        setTicketSearchQuery('')
+                                        setTicketSearchResults([])
+                                      }}
+                                      className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-[#f4f5f7]"
+                                    >
+                                      <span className="shrink-0 text-xs font-semibold text-[#0052cc]">
+                                        {issue.key}
+                                      </span>
+                                      <span className="truncate text-[#172b4d]">{issue.summary}</span>
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {dependencies.length === 0 ? (
+                        <p className="text-sm text-[#6b778c]">
+                          No dependencies added. This story can be worked on independently.
+                        </p>
+                      ) : (
+                        <div className="flex flex-col gap-1.5">
+                          {dependencies.map((dep, idx) => (
+                            <div
+                              key={idx}
+                              className="flex items-center gap-2 rounded border border-[#dfe1e6] bg-[#f4f5f7] px-3 py-1.5"
+                            >
+                              <span className="text-xs text-[#6b778c]">{dep.type}:</span>
+                              <span className="text-xs font-semibold text-[#0052cc]">{dep.issueKey}</span>
+                              {dep.summary && (
+                                <span className="flex-1 truncate text-xs text-[#172b4d]">{dep.summary}</span>
+                              )}
+                              <button
+                                onClick={() =>
+                                  setDependencies((prev) => prev.filter((_, i) => i !== idx))
+                                }
+                                className="ml-auto shrink-0 text-[#6b778c] hover:text-[#de350b]"
+                                aria-label="Remove dependency"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Generate button */}
@@ -374,12 +775,12 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
 
             {/* Right panel — generated stories */}
             <div className="flex w-1/2 flex-col gap-4">
-              <p className="text-sm font-medium text-[#172b4d]">Generated Story</p>
+              <p className="text-sm font-medium text-[#172b4d]">Generated Stories</p>
 
               {generationStatus === 'idle' && (
                 <div className="flex flex-1 flex-col items-center justify-center rounded-[10px] border border-[#dfe1e6] bg-white py-40">
                   <FileX className="h-12 w-12 text-[#dfe1e6]" />
-                  <p className="mt-4 text-base text-[#6b778c]">Your generated story will appear here</p>
+                  <p className="mt-4 text-base text-[#6b778c]">Your generated stories will appear here</p>
                 </div>
               )}
 
@@ -399,58 +800,149 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
                 </div>
               )}
 
-              {generationStatus === 'ready' && stories.length > 0 && (
-                <div className="flex flex-col gap-8 overflow-y-auto">
-                  {stories.map((story, storyIndex) => {
-                    const pts = storyPointsMap[story.id] ?? story.story_points
-                    const ac = Array.isArray(story.acceptance_criteria) ? story.acceptance_criteria : []
-                    const normalizedAC: string[] = ac.map((item) =>
-                      typeof item === 'string'
-                        ? item
-                        : `Given ${(item as { given: string; when: string; then: string }).given}, when ${(item as { given: string; when: string; then: string }).when}, then ${(item as { given: string; when: string; then: string }).then}`
-                    )
-                    const displayLabels =
-                      story.labels && story.labels.length > 0
-                        ? story.labels
-                        : [
-                            'user-story',
-                            story.priority ? `${story.priority.toLowerCase()}-priority` : 'medium-priority',
-                            'needs-refinement',
-                          ]
+              {generationStatus === 'ready' && stories.length > 0 ? (() => {
+                const story = stories[viewStoryIdx]
+                const storyIndex = viewStoryIdx
+                const pts = storyPointsMap[story.id] ?? story.story_points
+                const ac = Array.isArray(story.acceptance_criteria) ? story.acceptance_criteria : []
+                const normalizedAC: string[] = ac.map((item) =>
+                  typeof item === 'string'
+                    ? item
+                    : `Given ${(item as { given: string; when: string; then: string }).given}, when ${(item as { given: string; when: string; then: string }).when}, then ${(item as { given: string; when: string; then: string }).then}`
+                )
+                const displayLabels =
+                  story.labels && story.labels.length > 0
+                    ? story.labels
+                    : [
+                        'user-story',
+                        story.priority ? `${story.priority.toLowerCase()}-priority` : 'medium-priority',
+                        'needs-refinement',
+                      ]
 
-                    return (
-                      <div key={story.id} className="flex flex-col gap-4">
-                        {stories.length > 1 && (
-                          <p className="text-xs font-semibold uppercase tracking-wide text-[#6b778c]">
-                            Story {storyIndex + 1} of {stories.length}
-                          </p>
-                        )}
+                return (
+                  <div className="flex flex-col gap-4 overflow-y-auto">
+                    {stories.length > 1 && (
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-[#6b778c]">
+                          Story {storyIndex + 1} of {stories.length}
+                        </p>
+                        <button
+                          onClick={() => { setViewStoryIdx((i) => Math.max(0, i - 1)); setSelectedEpic(null); setEpicMenuOpen(false) }}
+                          disabled={viewStoryIdx === 0}
+                          className="rounded p-0.5 text-[#6b778c] hover:bg-[#f4f5f7] disabled:opacity-30"
+                          aria-label="Previous story"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => { setViewStoryIdx((i) => Math.min(stories.length - 1, i + 1)); setSelectedEpic(null); setEpicMenuOpen(false) }}
+                          disabled={viewStoryIdx === stories.length - 1}
+                          className="rounded p-0.5 text-[#6b778c] hover:bg-[#f4f5f7] disabled:opacity-30"
+                          aria-label="Next story"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
+                      </div>
+                    )}
 
-                        {/* Story points + Create Jira Ticket */}
+                        {/* Story points + Epic + Create Jira Ticket */}
                         <div className="rounded-[10px] border border-[#dfe1e6] bg-white px-4 py-4">
-                          <div className="flex items-center justify-between">
-                            <div className="relative">
-                              <select
-                                value={pts ?? ''}
-                                onChange={(e) => {
-                                  const val = e.target.value ? Number(e.target.value) : null
-                                  setStoryPointsMap((prev) => ({ ...prev, [story.id]: val }))
-                                }}
-                                className="h-9 appearance-none rounded border border-[#dfe1e6] bg-[#fafbfc] pl-3 pr-8 text-sm font-medium text-[#172b4d] focus:border-[#0052cc] focus:outline-none"
-                              >
-                                <option value="">— Points</option>
-                                {[1, 2, 3, 5, 8, 13].map((n) => (
-                                  <option key={n} value={n}>
-                                    {n} {n === 1 ? 'Point' : 'Points'}
-                                  </option>
-                                ))}
-                              </select>
-                              <ChevronDown className="pointer-events-none absolute right-2 top-2.5 h-4 w-4 text-[#6b778c]" />
+                          <div className="flex flex-col gap-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="relative">
+                                <select
+                                  value={pts ?? ''}
+                                  onChange={(e) => {
+                                    const val = e.target.value ? Number(e.target.value) : null
+                                    setStoryPointsMap((prev) => ({ ...prev, [story.id]: val }))
+                                  }}
+                                  className="h-9 appearance-none rounded border border-[#dfe1e6] bg-[#fafbfc] pl-3 pr-8 text-sm font-medium text-[#172b4d] focus:border-[#0052cc] focus:outline-none"
+                                >
+                                  <option value="">— Points</option>
+                                  {[1, 2, 3, 5, 8, 13].map((n) => (
+                                    <option key={n} value={n}>
+                                      {n} {n === 1 ? 'Point' : 'Points'}
+                                    </option>
+                                  ))}
+                                </select>
+                                <ChevronDown className="pointer-events-none absolute right-2 top-2.5 h-4 w-4 text-[#6b778c]" />
+                              </div>
+                              {createdTickets[story.id] ? (
+                                <a
+                                  href={createdTickets[story.id].url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="flex items-center gap-1.5 rounded border border-[#00875a] bg-[#e3fcef] px-3 py-1.5 text-sm font-medium text-[#00875a] hover:bg-[#abf5d1]"
+                                >
+                                  <ExternalLink className="h-4 w-4" />
+                                  {createdTickets[story.id].key}
+                                </a>
+                              ) : (
+                                <button
+                                  onClick={handleCreateTicket}
+                                  disabled={creatingTicket}
+                                  className="flex items-center gap-1.5 rounded bg-[#0052cc] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#0747a6] disabled:opacity-50"
+                                >
+                                  {creatingTicket ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
+                                  {creatingTicket ? 'Creating…' : 'Create Jira Ticket'}
+                                </button>
+                              )}
                             </div>
-                            <button className="flex items-center gap-1.5 rounded bg-[#0052cc] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#0747a6]">
-                              <ExternalLink className="h-4 w-4" />
-                              Create Jira Ticket
-                            </button>
+                            {!createdTickets[story.id] && (
+                              <div className="relative" ref={epicMenuRef}>
+                                <button
+                                  onClick={() => {
+                                    if (!epicMenuOpen && selectedProject && epics.length === 0 && !epicsLoading) {
+                                      fetchEpics(selectedProject.key)
+                                    }
+                                    setEpicMenuOpen((o) => !o)
+                                  }}
+                                  className="flex h-9 w-full items-center gap-2 rounded border border-[#dfe1e6] bg-[#f4f5f7] px-3 py-2 text-sm font-medium text-[#172b4d] hover:bg-[#ebecf0]"
+                                >
+                                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-[#0052cc] text-[9px] font-bold text-white">
+                                    E
+                                  </span>
+                                  <span className="flex-1 truncate text-left text-[#6b778c]">
+                                    {selectedEpic ? `${selectedEpic.key}: ${selectedEpic.summary}` : 'Link to epic (optional)…'}
+                                  </span>
+                                  {selectedEpic ? (
+                                    <span
+                                      role="button"
+                                      onClick={(e) => { e.stopPropagation(); setSelectedEpic(null) }}
+                                      className="ml-auto cursor-pointer rounded-full p-0.5 text-[#6b778c] hover:bg-[#dfe1e6]"
+                                    >
+                                      <X className="h-3 w-3" />
+                                    </span>
+                                  ) : (
+                                    <ChevronDown className="ml-auto h-4 w-4 text-[#6b778c]" />
+                                  )}
+                                </button>
+                                {epicMenuOpen && (
+                                  <div className="absolute left-0 top-full z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-[10px] border border-[#dfe1e6] bg-white shadow-lg">
+                                    {epicsLoading ? (
+                                      <div className="flex items-center justify-center py-4">
+                                        <Loader2 className="h-4 w-4 animate-spin text-[#6b778c]" />
+                                      </div>
+                                    ) : epics.length === 0 ? (
+                                      <p className="px-4 py-3 text-sm text-[#6b778c]">No epics found for this project</p>
+                                    ) : (
+                                      epics.map((epic) => (
+                                        <button
+                                          key={epic.id}
+                                          onClick={() => { setSelectedEpic(epic); setEpicMenuOpen(false) }}
+                                          className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-[#f4f5f7] ${
+                                            selectedEpic?.id === epic.id ? 'bg-[#deebff] font-medium text-[#0052cc]' : 'text-[#172b4d]'
+                                          }`}
+                                        >
+                                          <span className="shrink-0 text-xs font-semibold text-[#0052cc]">{epic.key}</span>
+                                          <span className="truncate">{epic.summary}</span>
+                                        </button>
+                                      ))
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
 
@@ -558,11 +1050,9 @@ export default function GeneratePage({ displayName, jiraDisplayName, email, proj
                             </div>
                           </div>
                         </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
+                  </div>
+                )
+              })() : null}
             </div>
           </div>
         </div>
