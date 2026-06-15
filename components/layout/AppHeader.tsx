@@ -10,8 +10,11 @@ export function AppHeader() {
 
   async function handleSignOut() {
     const supabase = createClient()
-    await supabase.auth.signOut()
-    router.push('/login')
+    await Promise.all([
+      supabase.auth.signOut(),
+      fetch('/api/auth/signout', { method: 'POST' }),
+    ])
+    router.push('/')
   }
 
   return (

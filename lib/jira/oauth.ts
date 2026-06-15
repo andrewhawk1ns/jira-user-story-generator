@@ -32,7 +32,6 @@ export function buildAuthorizationUrl(challenge: string, state: string): string 
     redirect_uri: process.env.JIRA_REDIRECT_URI!,
     state,
     response_type: 'code',
-    prompt: 'consent',
     code_challenge: challenge,
     code_challenge_method: 'S256',
   })

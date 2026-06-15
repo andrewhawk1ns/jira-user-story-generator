@@ -1,11 +1,31 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Image from 'next/image'
 import { toast } from 'sonner'
 
 export default function LoginPage() {
   const [loading, setLoading] = useState(false)
+  // While we attempt a silent token refresh on mount, show a loading state
+  // so the user doesn't see a flash of the login button before being redirected.
+  const [checkingSession, setCheckingSession] = useState(true)
+
+  useEffect(() => {
+    async function trySilentRefresh() {
+      try {
+        const res = await fetch('/api/auth/refresh')
+        if (res.ok) {
+          // Session re-established — send the user straight to the app.
+          window.location.href = '/'
+          return
+        }
+      } catch {
+        // Network error or server error — fall through to normal login.
+      }
+      setCheckingSession(false)
+    }
+    trySilentRefresh()
+  }, [])
 
   async function handleContinue() {
     setLoading(true)
@@ -71,10 +91,10 @@ export default function LoginPage() {
 
               <button
                 onClick={handleContinue}
-                disabled={loading}
+                disabled={loading || checkingSession}
                 className="h-10 w-full rounded bg-[#0052cc] text-sm font-medium text-white transition-colors hover:bg-[#0747a6] disabled:opacity-60"
               >
-                {loading ? 'Redirecting…' : 'Continue'}
+                {loading || checkingSession ? 'Redirecting…' : 'Continue'}
               </button>
             </div>
 

@@ -154,6 +154,17 @@ export async function GET(request: NextRequest) {
       refresh_token: verifyData.session.refresh_token,
     })
 
+    // Persist a long-lived identity cookie so silent refresh can work
+    // after the Supabase session expires. The value is just the Supabase
+    // user UUID — not a credential on its own.
+    response.cookies.set('sg_uid', userId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 60 * 60 * 24 * 30, // 30 days
+      path: '/',
+    })
+
     return response
 
   } catch (err) {
